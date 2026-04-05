@@ -1,0 +1,669 @@
+%% ============================================================
+%%  Slide 2: Outline
+%% ============================================================
+\begin{frame}{Outline}
+  \begin{enumerate}
+    \item[\textbf{1.}] \textbf{Motivation} --- LLMs are too large \\[0.6em]
+    \item[\textbf{2.}] \textbf{Background} --- PTQ and Vector Quantization \\[0.6em]
+    \item[\textbf{3.}] \textbf{VPTQ Methods} --- Four key components \\[0.6em]
+    \item[\textbf{4.}] \textbf{End-to-End Algorithm} \\[0.6em]
+    \item[\textbf{5.}] \textbf{Experimental Results}
+  \end{enumerate}
+\end{frame}
+
+%% ============================================================
+%%  Section 1: Motivation
+%% ============================================================
+\section{Motivation}
+
+\begin{frame}{LLMs Are Too Large to Deploy}
+  \begin{itemize}
+    \item LLM size grows rapidly with capability
+    \begin{itemize}
+      \item LLaMA-2 70B in FP16 $\approx$ \textbf{140 GB} RAM
+      \item Requires multiple high-end GPUs $\rightarrow$ high deployment cost
+    \end{itemize}
+    \vspace{0.5em}
+    \item \textbf{Weight-only Quantization}: compress weights to low-bit without retraining
+    \begin{itemize}
+      \item Reduces memory and improves inference throughput
+      \item FP16 (16-bit) $\rightarrow$ 2-bit: memory reduced by $8\times$
+    \end{itemize}
+    \vspace{0.5em}
+    \item Key question: \textbf{Can we push to 2-bit while keeping usable accuracy?}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{The Limit of Scalar Quantization}
+  \begin{columns}[T]
+    \begin{column}{0.55\textwidth}
+      \begin{itemize}
+        \item \textbf{Scalar quantization}: round each weight independently to a low-bit value
+        \vspace{0.5em}
+        \item 2-bit $\rightarrow$ only \textbf{4 distinct values}: $\{0, 1, 2, 3\}$
+        \vspace{0.5em}
+        \item GPTQ and similar methods work well at 3--4 bit, but \textbf{accuracy collapses at 2-bit}
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.42\textwidth}
+      \vspace{0.5em}
+      \textbf{Example}: 2-bit scalar quantization
+
+      \vspace{0.4em}
+      \begin{tabular}{lll}
+        \toprule
+        Original & Quantized & Error \\
+        \midrule
+        $0.73$ & $1$ & $0.27$ \\
+        $0.31$ & $0$ & $0.31$ \\
+        $-0.68$ & $-1$ & $0.32$ \\
+        $0.95$ & $1$ & $0.05$ \\
+        \bottomrule
+      \end{tabular}
+
+      \vspace{0.5em}
+      \small Large errors; cannot capture\\the diversity of weight values
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{The Intuition Behind Vector Quantization}
+  \begin{itemize}
+    \item \textbf{Key idea}: group multiple weights together and represent them as a single entry in a \emph{codebook}
+  \end{itemize}
+  \vspace{0.3em}
+  \begin{columns}[T]
+    \begin{column}{0.52\textwidth}
+      \textbf{Example}: vector length $v=2$, codebook size $k=4$
+
+      \vspace{0.4em}
+      \begin{tabular}{cl}
+        \toprule
+        Index & Centroid \\
+        \midrule
+        0 & $[-0.80,\ -0.25]$ \\
+        1 & $[-0.10,\ \ 0.60]$ \\
+        2 & $[\ \ 0.30,\ -0.50]$ \\
+        \rowcolor{mycolor!15}
+        3 & $[\ \ 0.72,\ \ 0.28]$ \\
+        \bottomrule
+      \end{tabular}
+
+      \vspace{0.4em}
+      $[0.70,\ 0.30]$ $\xrightarrow{\text{encode}}$ \textbf{index 3}
+
+      index $3$ $\xrightarrow{\text{decode}}$ $[0.72,\ 0.28]$
+    \end{column}
+    \begin{column}{0.45\textwidth}
+      \textbf{Scalar vs.\ VQ}
+
+      \vspace{0.4em}
+      \begin{itemize}
+        \item Scalar 2-bit: \textbf{4} distinct values
+        \item VQ ($v=2$, $k=4$): \textbf{4} distinct 2D vectors\\
+              $\rightarrow$ covers a much wider 2D space
+        \vspace{0.4em}
+        \item $v=8$, $k=256$: 256 distinct 8D vectors\\
+              $\approx$ effective \textbf{1 bit/weight}
+      \end{itemize}
+      \vspace{0.3em}
+      \small Exploits correlations across\\weights for richer representation
+    \end{column}
+  \end{columns}
+\end{frame}
+
+%% ============================================================
+%%  Section 2: Background
+%% ============================================================
+\section{Background}
+
+\begin{frame}{Post-Training Quantization: Deriving the Objective}
+  \textbf{Goal}: quantize $\mathbf{W} \to \hat{\mathbf{W}}$ with minimal change to the task loss $\mathcal{L}$
+
+  \vspace{0.4em}
+  \textbf{Taylor-expand} the loss change around the original weights:
+  \[
+    \mathcal{L}(\hat{\mathbf{W}}) - \mathcal{L}(\mathbf{W})
+    \;\approx\;
+    \underbrace{g(\mathbf{W})^T}_{\text{gradient}}\!\Delta\mathbf{W}
+    \;+\;
+    \frac{1}{2}\,\Delta\mathbf{W}^T \underbrace{H(\mathbf{W})}_{\text{Hessian}} \Delta\mathbf{W}
+    \quad (\Delta\mathbf{W} = \hat{\mathbf{W}} - \mathbf{W})
+  \]
+
+  \vspace{0.3em}
+  \textbf{Assumption}: the pre-trained model is near a local minimum
+  \[
+    g(\mathbf{W}) \approx \mathbf{0}
+    \quad\Rightarrow\quad
+    \text{1st-order term drops out}
+  \]
+
+  \vspace{0.3em}
+  \textbf{PTQ objective}:
+  \[
+    \boxed{\;\arg\min_{\Delta\mathbf{W}}\ \Delta\mathbf{W}^T H(\mathbf{W})\,\Delta\mathbf{W}\;}
+  \]
+
+  \begin{itemize}
+    \item $H_{ii}$ large $\;\rightarrow\;$ weight $i$ strongly affects loss $\;\rightarrow\;$ quantize it \textbf{precisely}
+    \item $H_{ii}$ small $\;\rightarrow\;$ weight $i$ is insensitive $\;\rightarrow\;$ can tolerate larger error
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Computing the Hessian in Practice}
+  \textbf{Challenge}: computing the full Hessian of the task loss is intractable for LLMs
+
+  \vspace{0.5em}
+  \textbf{Layer-wise approximation} (GPTQ):
+  \begin{itemize}
+    \item Quantize one layer at a time; treat each layer's output error as the local loss
+    \[
+      \mathcal{L}_\ell \;=\; \|\mathbf{W}\mathbf{X} - \hat{\mathbf{W}}\mathbf{X}\|_F^2
+    \]
+    \item $\mathbf{X}$: layer input collected from calibration data
+    \item This is a quadratic in $\Delta\mathbf{W}$, so its Hessian is exact and cheap:
+    \[
+      H \;=\; 2\,\mathbf{X}\mathbf{X}^T
+    \]
+  \end{itemize}
+
+  \vspace{0.3em}
+  \textbf{Key point}: $H = 2\mathbf{X}\mathbf{X}^T$ tells us \emph{which directions in weight space matter}
+  \begin{itemize}
+    \item Directions where $\mathbf{X}$ has high variance $\;\rightarrow\;$ large $H_{ii}$ $\;\rightarrow\;$ sensitive weights
+    \item Directions where $\mathbf{X}$ is near zero $\;\rightarrow\;$ small $H_{ii}$ $\;\rightarrow\;$ safe to quantize coarsely
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Limitations of Existing VQ Methods}
+  \begin{center}
+    \small
+    \begin{tabular}{lccccc}
+      \toprule
+      & \textbf{VPTQ} & AQLM & QuIP\# & GPTVQ & GPTQ \\
+      \midrule
+      Effective Bitwidth   & \textcolor{mycolor}{$\Uparrow$} & $\uparrow$ & $\uparrow$ & $\uparrow$ & $\downarrow$ \\
+      Accuracy @ Low-bit   & \textcolor{mycolor}{$\Uparrow$} & $\uparrow$ & $\uparrow$ & $\downarrow$ & $\downarrow$ \\
+      Quantization Speed   & \textcolor{mycolor}{$\Uparrow$} & $\Downarrow$ & --- & $\uparrow$ & $\Uparrow$ \\
+      Inference Throughput & \textcolor{mycolor}{$\Uparrow$} & $\uparrow$ & $\downarrow$ & --- & $\uparrow$ \\
+      \bottomrule
+    \end{tabular}
+    \par\vspace{0.3em}\small $\Uparrow$: best, $\uparrow$: good, $\downarrow$: poor
+  \end{center}
+  \vspace{0.3em}
+  \begin{itemize}
+    \item \textbf{GPTVQ}: quantizes $v$ columns simultaneously $\rightarrow$ errors accumulate $\rightarrow$ short vectors only
+    \item \textbf{AQLM}: requires gradient backprop $\rightarrow$ GPU-hours ($>$11h for 7B)
+    \item \textbf{QuIP\#}: Hadamard transform at inference $\rightarrow$ $O(n^2)$ overhead per operator
+    \item \textbf{VPTQ}: addresses all of the above simultaneously
+  \end{itemize}
+\end{frame}
+
+%% ============================================================
+%%  Section 3: VPTQ Key Methods
+%% ============================================================
+\section{VPTQ Key Methods}
+
+\begin{frame}{VPTQ: Overview of Four Components}
+  \begin{center}
+  \begin{tikzpicture}[
+    box/.style={draw=mycolor, fill=mycolor!10, rounded corners, text width=6cm,
+                minimum height=1cm, align=center, font=\small},
+    node distance=0.45cm
+  ]
+    \node[box] (a) {\textbf{Component 1}: Channel-Independent\\Second-Order Optimization};
+    \node[box, below=of a] (b) {\textbf{Component 2}: Hessian-Weighted\\Centroid Initialization};
+    \node[box, below=of b] (c) {\textbf{Component 3}: Residual Vector Quantization};
+    \node[box, below=of c] (d) {\textbf{Component 4}: Outlier Elimination};
+    \draw[->, thick, mycolor] (a)--(b);
+    \draw[->, thick, mycolor] (b)--(c);
+    \draw[->, thick, mycolor] (c)--(d);
+  \end{tikzpicture}
+  \end{center}
+\end{frame}
+%% --- Component 1 ---
+\begin{frame}{Component 1: Channel-Independent Second-Order Optimization}
+  \begin{itemize}
+    \item \textbf{Problem with GPTVQ}: quantizes $v$ columns jointly
+    \begin{itemize}
+      \item Quantization errors inside the current block cannot be corrected immediately
+      \item Errors accumulate as vector length grows
+      \item This limits GPTVQ to relatively short vectors
+    \end{itemize}
+    \vspace{0.4em}
+    \item \textbf{VPTQ idea}: quantize \emph{one column at a time}
+    \begin{itemize}
+      \item Quantize column $A$ $\rightarrow$ immediately propagate its error to the remaining columns
+      \item Then quantize $B$, then $C$, then $D$, \dots
+      \item This reduces error accumulation and supports longer vectors / larger codebooks
+    \end{itemize}
+    \vspace{0.4em}
+    \item \textbf{Key assumption}: the Hessian is approximately diagonally dominant
+    \[
+      \Rightarrow \text{inter-column interactions are weaker than same-column effects}
+    \]
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Component 1: Why Nearest-Centroid Search Appears}
+  \begin{itemize}
+    \item Start from the Hessian-aware PTQ objective:
+  \end{itemize}
+  \[
+    \arg\min_{\Delta \mathbf W}\ \Delta \mathbf W^T H\,\Delta \mathbf W
+  \]
+  \begin{itemize}
+    \item For a fixed column $q$, VPTQ applies the Lagrange method and obtains
+  \end{itemize}
+  \[
+    \Delta L_q
+    =
+    \frac{\|\hat{\mathbf W}_{:,q}-\mathbf W_{:,q}\|_2^2}{2H_{qq}^{-1}}
+  \]
+  \begin{itemize}
+    \item Thus, for column $q$, the loss increase is proportional to the reconstruction error of that column
+    \item In VQ, column $q$ is split into subvectors $\mathbf v_j$, each represented by a centroid $\mathcal C_{i_j}$
+  \end{itemize}
+  \[
+    \|\hat{\mathbf W}_{:,q}-\mathbf W_{:,q}\|_2^2
+    =
+    \sum_j \|\mathbf v_j-\mathcal C_{i_j}\|_2^2
+  \]
+\end{frame}
+
+\begin{frame}{Component 1: The Local Quantization Rule}
+  \begin{itemize}
+    \item Substituting the VQ form into the second-order loss gives
+  \end{itemize}
+  \[
+    \Delta L_q
+    =
+    \frac{\sum_j \|\mathbf v_j-\mathcal C_{i_j}\|_2^2}{2H_{qq}^{-1}}
+  \]
+  \begin{itemize}
+    \item For a fixed column $q$, $H_{qq}^{-1}$ is a \textbf{constant}
+    \item Therefore it does not change the minimizer
+    \vspace{0.3em}
+    \item The optimization reduces to minimizing Euclidean reconstruction error:
+  \end{itemize}
+  \[
+    \arg\min_i \|\mathbf v-\mathcal C_i\|^2
+  \]
+  \begin{itemize}
+    \item This is exactly the \textbf{nearest-centroid assignment} in K-means / VQ
+    \item \textbf{Interpretation}: once the second-order objective is fixed, choosing the centroid becomes a simple Euclidean lookup
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Component 1: Where the Hessian is Still Used}
+  \begin{itemize}
+    \item The Hessian does \textbf{not} disappear from the algorithm
+    \item It is used in two places:
+    \begin{enumerate}
+      \item \textbf{Defining the second-order PTQ objective}
+      \[
+        \Delta \mathbf W^T H\,\Delta \mathbf W
+      \]
+      \item \textbf{Propagating quantization error to the remaining columns}
+      \[
+        E_{:,n} = \frac{\mathbf W_{:,n} - \hat{\mathbf W}_{:,n}}{H^{-1}_{nn}}
+      \]
+      \[
+        \mathbf W_{:,\,n:s+B}
+        \leftarrow
+        \mathbf W_{:,\,n:s+B} - E_{:,n} H^{-1}_{n,\,n:s+B}
+      \]
+    \end{enumerate}
+    \vspace{0.3em}
+    \item So:
+    \begin{itemize}
+      \item \textbf{Centroid selection} becomes Euclidean nearest-neighbor
+      \item \textbf{Error correction / propagation} remains Hessian-aware
+    \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Component 1: Why This Helps Over GPTVQ}
+  \begin{itemize}
+    \item \textbf{GPTVQ}: quantizes multiple columns together
+    \begin{itemize}
+      \item Internal errors within the current block accumulate before correction
+      \item Longer vectors become difficult to use
+    \end{itemize}
+    \vspace{0.4em}
+    \item \textbf{VPTQ}: quantizes one column, then immediately updates the remaining weights
+    \begin{itemize}
+      \item Less accumulation of local quantization error
+      \item Better compatibility with longer vector lengths
+      \item Simple nearest-centroid assignment instead of expensive training-based optimization
+    \end{itemize}
+    \vspace{0.4em}
+    \item \textbf{Practical result}: VPTQ reports using only \textbf{10.4--18.6\%} of the quantization time of prior SOTA methods while achieving better 2-bit accuracy
+  \end{itemize}
+\end{frame}
+
+%% --- Component 2 ---
+\begin{frame}{Component 2: Hessian-Weighted Centroid Initialization}
+  \begin{itemize}
+    \item K-means needs good initial centroids. VPTQ uses a \textbf{Weighted K-means} objective:
+  \end{itemize}
+  \[
+    \min_{\{\mathcal{C}_j\}} \sum_{i} h_{ii}\,\|\mathbf{w}_i - \mathcal{C}_{\sigma(i)}\|^2
+  \]
+  \begin{itemize}
+    \item $h_{ii} = H_{ii}$: Hessian diagonal --- how much weight $i$ impacts the loss
+    \item $\sigma(i)$: centroid assignment for weight $i$
+  \end{itemize}
+  \vspace{0.2em}
+  Weighted centroid update:
+  \[
+    \mathcal{C}_j \;\leftarrow\; \frac{\displaystyle\sum_{i:\,\sigma(i)=j} h_{ii}\,\mathbf{w}_i}{\displaystyle\sum_{i:\,\sigma(i)=j} h_{ii}}
+  \]
+ 
+\end{frame}
+
+\begin{frame}{Component 2: Hessian-Weighted Centroid Initialization}
+  \begin{columns}[T]
+    \begin{column}{0.5\textwidth}
+      \small\textbf{Example}: 4 weights, 2 centroids\\[0.3em]
+      \begin{tabular}{llll}
+        weight & value & $h_{ii}$ & cluster \\
+        \midrule
+        $w_1$ & $0.04$ & $10.0$ & A \\
+        $w_2$ & $0.06$ & $8.0$  & A \\
+        $w_3$ & $0.80$ & $0.1$  & B \\
+        $w_4$ & $1.00$ & $0.2$  & B \\
+      \end{tabular}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \small
+      Standard K-means centroid A:\\
+      $\frac{0.04+0.06}{2} = 0.05$\\[0.5em]
+      \textbf{Weighted} centroid A:\\
+      $\frac{10.0\times0.04\;+\;8.0\times0.06}{10.0+8.0} = \frac{0.88}{18} \approx 0.049$\\[0.5em]
+      \textcolor{mycolor}{High-$h_{ii}$ weights pull the centroid\\more strongly toward themselves}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+
+%% --- Component 3 ---
+\begin{frame}{Component 3: Residual Vector Quantization (RVQ)}
+  \begin{itemize}
+    \item \textbf{Idea}: quantize the \emph{residual error} of the first VQ stage again with a second codebook
+  \end{itemize}
+  \vspace{0.3em}
+  \textbf{Example}: vector $\mathbf{v} = [0.70,\ 0.30]$
+
+  \vspace{0.3em}
+  \begin{center}
+    \begin{tabular}{llll}
+      \toprule
+      Stage & Value & Stored & \\
+      \midrule
+      Original & $[0.70,\ 0.30]$ & --- & \\
+      1st VQ result $Q(\mathbf{v})$ & $[0.72,\ 0.28]$ & index $i_1$ & \\
+      Residual $\mathbf{v}_{\text{res}} = \mathbf{v} - Q(\mathbf{v})$ & $[-0.02,\ 0.02]$ & --- & \\
+      2nd VQ result $Q(\mathbf{v}_{\text{res}})$ & $[-0.019,\ 0.021]$ & index $i_2$ & \\
+      \midrule
+      \textbf{Final reconstruction} & $[0.701,\ 0.301]$ & $i_1 + i_2$ only & \\
+      \bottomrule
+    \end{tabular}
+  \end{center}
+  \vspace{0.3em}
+  \begin{itemize}
+    \item Additional cost: only the size of $i_2$ (small second codebook)
+    \item Large accuracy gain for small bit overhead
+    \item GPTVQ does \emph{not} support RVQ --- a key advantage of VPTQ
+  \end{itemize}
+\end{frame}
+
+%% --- Component 4 ---
+\begin{frame}{Component 4: Outlier Elimination}
+  \begin{itemize}
+    \item \textbf{Problem}: $\sim$1\% of weights are very large (outliers), dominating quantization error
+  \end{itemize}
+  \vspace{0.3em}
+  \textbf{Example}: weight matrix with outliers
+
+  \vspace{0.3em}
+  \begin{columns}[T]
+    \begin{column}{0.50\textwidth}
+      \textbf{Without outlier handling}\\[0.3em]
+      \small
+      \begin{tabular}{lc}
+        Weight range & Fraction \\
+        \midrule
+        $[-0.5,\ 0.5]$ (normal) & 99\% \\
+        $\pm 10.0$ (outlier) & 1\% \\
+      \end{tabular}\\[0.4em]
+      Codebook must span $[-10,\ 10]$\\
+      $\rightarrow$ centroids spread too wide\\
+      \textcolor{mycolor}{$\rightarrow$ normal weights poorly represented}
+    \end{column}
+    \begin{column}{0.47\textwidth}
+      \textbf{VPTQ: separate outlier codebook}\\[0.3em]
+      \small
+      \textbf{Outlier codebook}: top 1\% weights\\
+      $\rightarrow$ dedicated centroids for $[-10,\ 10]$\\[0.3em]
+      \textbf{Main codebook}: remaining 99\%\\
+      $\rightarrow$ dedicated centroids for $[-0.5,\ 0.5]$\\[0.3em]
+      \textcolor{mycolor!70!black}{$\rightarrow$ both groups represented precisely}
+    \end{column}
+  \end{columns}
+  \vspace{0.4em}
+  \begin{itemize}
+    \item Outliers identified by large Hessian diagonal values
+    \item Outlier fraction $N\%$ is tunable (typically 1\%)
+  \end{itemize}
+\end{frame}
+
+%% ============================================================
+%%  Section 4: End-to-End Algorithm
+%% ============================================================
+\section{End-to-End Algorithm}
+
+\begin{frame}{End-to-End Quantization Algorithm}
+  \begin{columns}[T]
+    \begin{column}{0.50\textwidth}
+      \textbf{Per-layer procedure:}
+      \begin{enumerate}
+        \small
+        \item \textbf{Outlier handling}\\
+          Separate top $N\%$ outlier columns\\
+          $\rightarrow$ quantize with outlier codebook
+        \item \textbf{Main VPTQ}\\
+          Hessian-weighted centroid init\\
+          $\rightarrow$ build codebook via K-means\\
+          $\rightarrow$ column-wise independent quantization
+        \item \textbf{Residual VQ} (optional)\\
+          Compress residual error with a second codebook
+        \item \textbf{Layer fine-tuning} (optional)\\
+          Lightweight re-optimization of current layer
+      \end{enumerate}
+    \end{column}
+    \begin{column}{0.47\textwidth}
+      \textbf{At inference:}
+      \begin{itemize}
+        \small
+        \item Store indices + codebook instead of FP16 weights
+        \item Dequantization = \textbf{codebook lookup only}
+        \item No Hadamard transform required
+        \item $\rightarrow$ \textbf{1.6--1.8$\times$} faster inference vs.\ SOTA
+      \end{itemize}
+      \vspace{0.5em}
+      \textbf{Parallelism:}
+      \begin{itemize}
+        \small
+        \item Layers are independent $\rightarrow$ full GPU parallelism
+        \item Quantization is \textbf{5--10$\times$} faster than AQLM
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+%% ============================================================
+%%  Section 5: Experiments
+%% ============================================================
+\section{Experiments}
+
+\begin{frame}{Experimental Setup}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \textbf{Models}
+      \begin{itemize}
+        \item LLaMA-2: 7B, 13B, 70B
+        \item LLaMA-3: 8B, 70B
+        \item Mistral-7B
+      \end{itemize}
+      \vspace{0.5em}
+      \textbf{Metrics}
+      \begin{itemize}
+        \item WikiText-2 perplexity $\downarrow$
+        \item C4 perplexity $\downarrow$
+        \item 5 zero-shot QA tasks $\uparrow$\\
+          \small (PIQA, HellaSwag, WinoGrande,\\ARC-easy, ARC-challenge)
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \textbf{Baselines}
+      \begin{itemize}
+        \item GPTQ
+        \item GPTVQ
+        \item QuIP\#
+        \item AQLM
+        \item DB-LLM
+      \end{itemize}
+      \vspace{0.5em}
+      \textbf{Calibration data}
+      \begin{itemize}
+        \item 128 segments from C4 dataset
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{LLaMA-2 7B: 2-bit Results}
+  \begin{center}
+  \scriptsize
+  \begin{tabular}{lccccccc}
+    \toprule
+    Method & bit & W2$\downarrow$ & C4$\downarrow$ & AvgQA$\uparrow$ & tok/s$\uparrow$ & mem(GB)$\downarrow$ & cost(h)$\downarrow$ \\
+    \midrule
+    FP16    & 16    & 5.12  & 6.63  & 62.2          & 38.32         & 27.22         & N/A  \\
+    GPTQ    & 2.125 & 50.75 & 36.76 & 39.16         & 19.59         & 4.42          & 0.2  \\
+    GPTVQ   & 2.25  & 6.71  & 9.9   & 56.14         & N/A           & N/A           & 1.5  \\
+    DB-LLM  & 2.01  & 7.23  & 9.62  & 55.1          & N/A           & N/A           & N/A  \\
+    QuIP\#  & 2     & 6.19  & 8.16  & \textbf{58.2} & 4.4           & 2.25          & N/A  \\
+    AQLM    & 2.02  & 6.64  & 8.56  & 56.5          & 19.4          & \textbf{2.16} & N/A  \\
+    AQLM    & 2.29  & 6.29  & 8.11  & 58.6          & 19.6          & 2.4           & 11.07 \\
+    \midrule
+    \rowcolor{mycolor!15}
+    \textbf{VPTQ} & 2.02 & \textbf{6.13} & \textbf{8.07} & \textbf{58.2} & \textbf{39.9} & 2.28 & \textbf{2} \\
+    \rowcolor{mycolor!10}
+    \textbf{VPTQ} & 2.26 & \textbf{5.95} & \textbf{7.87} & \textbf{59.4} & 35.7          & 2.48 & 2.2 \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+  \vspace{0.2em}
+  \begin{itemize}
+    \item \textbf{Perplexity}: VPTQ 6.13 vs.\ AQLM 6.64 (lower is better)
+    \item \textbf{Throughput}: VPTQ 39.9 tok/s vs.\ AQLM 19.4 ($\approx 2\times$), QuIP\# 4.4 ($\approx 9\times$)
+    \item \textbf{Quantization time}: AQLM 11h vs.\ VPTQ \textbf{2h}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{LLaMA-3 and Mistral: 2-bit Results}
+  \begin{columns}[T]
+    \begin{column}{0.52\textwidth}
+      \scriptsize
+      \begin{tabular}{lccc}
+        \toprule
+        Method & bit & W2$\downarrow$ & AvgQA$\uparrow$ \\
+        \midrule
+        \multicolumn{4}{l}{\textit{LLaMA-3 8B}} \\
+        FP16          & 16   & 6.14              & 68.6          \\
+        QuIP          & 2    & 85.1              & 36.8          \\
+        DB-LLM        & 2    & 13.6              & 51.7          \\
+        GPTQ          & 2    & $2.10\!\times\!10^{2}$ & 36.2     \\
+        \rowcolor{mycolor!15}
+        \textbf{VPTQ} & 2.08 & \textbf{9.29}     & \textbf{60.2} \\
+        \midrule
+        \multicolumn{4}{l}{\textit{LLaMA-3 70B}} \\
+        FP16          & 16   & 2.9               & 75.3          \\
+        GPTQ          & 2    & 11.9              & 45.4          \\
+        \rowcolor{mycolor!15}
+        \textbf{VPTQ} & 2.02 & \textbf{5.6}      & \textbf{70.9} \\
+        \bottomrule
+      \end{tabular}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \scriptsize
+      \begin{tabular}{lcccc}
+        \toprule
+        Method & bit & W2$\downarrow$ & C4$\downarrow$ & AvgQA$\uparrow$ \\
+        \midrule
+        \multicolumn{5}{l}{\textit{Mistral-7B}} \\
+        FP16          & 16.0  & 4.77          & 5.71          & 68.6          \\
+        QuIP\#        & 2.01  & 6.02          & 6.84          & 62.2          \\
+        AQLM          & 2.01  & 6.32          & 6.93          & 62.2          \\
+        GPTQ          & 2.125 & 1535          & 164           & 44.5          \\
+        GPTVQ         & 2.25  & 8.99          & 18.6          & 57.7          \\
+        \rowcolor{mycolor!15}
+        \textbf{VPTQ} & 2.04  & \textbf{5.64} & \textbf{6.43} & \textbf{63.2} \\
+        \bottomrule
+      \end{tabular}
+      \vspace{0.7em}
+      \begin{itemize}\scriptsize
+        \item LLaMA-3: competing methods \textbf{collapse} at 2-bit; VPTQ remains stable
+        \item Mistral: VPTQ outperforms QuIP\# and AQLM across all metrics
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+
+%% ============================================================
+%%  Section 6: Conclusion
+%% ============================================================
+\section{Conclusion}
+
+\begin{frame}{Conclusion}
+  \begin{columns}[T]
+    \begin{column}{0.55\textwidth}
+      \textbf{Four components of VPTQ}
+      \begin{enumerate}
+        \item \textbf{Channel-Independent Opt.}\\
+          Column-wise quantization prevents error accumulation
+        \vspace{0.3em}
+        \item \textbf{Hessian-Weighted Init.}\\
+          Centroid placement guided by loss sensitivity
+        \vspace{0.3em}
+        \item \textbf{Residual VQ}\\
+          Re-compresses residual for better accuracy
+        \vspace{0.3em}
+        \item \textbf{Outlier Elimination}\\
+          Separates outliers to protect main codebook
+      \end{enumerate}
+    \end{column}
+    \begin{column}{0.42\textwidth}
+      \textbf{Key results}
+      \begin{itemize}
+        \item Perplexity reduced by \textbf{0.01--7.34} over SOTA at 2-bit
+        \item QA accuracy improved by \textbf{0.8--22\%}
+        \item \textbf{1.6--1.8$\times$} faster inference
+        \item Uses only \textbf{10--18\%} of quantization time vs.\ AQLM
+      \end{itemize}
+      \vspace{0.5em}
+      \textbf{Limitations}
+      \begin{itemize}
+        \item Fine-tuning 70B models requires more GPU resources
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \vspace{0.5em}
+  \begin{center}
+    \textbf{VPTQ makes practical 2-bit LLM deployment a reality}
+  \end{center}
+\end{frame}
