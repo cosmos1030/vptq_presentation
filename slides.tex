@@ -95,19 +95,15 @@
       index $3$ $\xrightarrow{\text{decode}}$ $[0.72,\ 0.28]$
     \end{column}
     \begin{column}{0.45\textwidth}
-      \textbf{Scalar vs.\ VQ}
+      \textbf{Scalar vs.\ VQ at the same 2-bit budget}
 
       \vspace{0.4em}
       \begin{itemize}
-        \item Scalar 2-bit: \textbf{4} distinct values
-        \item VQ ($v=2$, $k=4$): \textbf{4} distinct 2D vectors\\
-              $\rightarrow$ covers a much wider 2D space
-        \vspace{0.4em}
-        \item $v=8$, $k=256$: 256 distinct 8D vectors\\
-              $\approx$ effective \textbf{1 bit/weight}
+        \item Scalar 2-bit: each weight has \textbf{4} possible values
+        \item VQ ($v=2$, $k=16$): each 2D vector is chosen from \textbf{16} learned 2D centroids
+        \item Both use \textbf{2 bits/weight}, but VQ represents weights \textbf{jointly} rather than independently
+        \item $\rightarrow$ exploits correlations across weights for richer representation
       \end{itemize}
-      \vspace{0.3em}
-      \small Exploits correlations across\\weights for richer representation
     \end{column}
   \end{columns}
 \end{frame}
@@ -166,13 +162,6 @@
     \[
       H \;=\; 2\,\mathbf{X}\mathbf{X}^T
     \]
-  \end{itemize}
-
-  \vspace{0.3em}
-  \textbf{Key point}: $H = 2\mathbf{X}\mathbf{X}^T$ tells us \emph{which directions in weight space matter}
-  \begin{itemize}
-    \item Directions where $\mathbf{X}$ has high variance $\;\rightarrow\;$ large $H_{ii}$ $\;\rightarrow\;$ sensitive weights
-    \item Directions where $\mathbf{X}$ is near zero $\;\rightarrow\;$ small $H_{ii}$ $\;\rightarrow\;$ safe to quantize coarsely
   \end{itemize}
 \end{frame}
 
@@ -272,7 +261,7 @@
   \]
 \end{frame}
 
-\begin{frame}{Component 1: The Local Quantization Rule}
+\begin{frame}{Component 1: Why Nearest-Centroid Search Appears}
   \begin{itemize}
     \item Substituting the VQ form into the second-order loss gives
   \end{itemize}
@@ -296,7 +285,8 @@
   \end{itemize}
 \end{frame}
 
-\begin{frame}{Component 1: Where the Hessian is Still Used}
+\begin{frame}{Component 1: Error Propagation Still Requires the Hessian}
+   \
   \begin{itemize}
     \item The Hessian does \textbf{not} disappear from the algorithm
     \item It is used in two places:
@@ -321,25 +311,6 @@
       \item \textbf{Centroid selection} becomes Euclidean nearest-neighbor
       \item \textbf{Error correction / propagation} remains Hessian-aware
     \end{itemize}
-  \end{itemize}
-\end{frame}
-
-\begin{frame}{Component 1: Why This Helps Over GPTVQ}
-  \begin{itemize}
-    \item \textbf{GPTVQ}: quantizes multiple columns together
-    \begin{itemize}
-      \item Internal errors within the current block accumulate before correction
-      \item Longer vectors become difficult to use
-    \end{itemize}
-    \vspace{0.4em}
-    \item \textbf{VPTQ}: quantizes one column, then immediately updates the remaining weights
-    \begin{itemize}
-      \item Less accumulation of local quantization error
-      \item Better compatibility with longer vector lengths
-      \item Simple nearest-centroid assignment instead of expensive training-based optimization
-    \end{itemize}
-    \vspace{0.4em}
-    \item \textbf{Practical result}: VPTQ reports using only \textbf{10.4--18.6\%} of the quantization time of prior SOTA methods while achieving better 2-bit accuracy
   \end{itemize}
 \end{frame}
 
@@ -368,20 +339,18 @@
     \begin{column}{0.5\textwidth}
       \small\textbf{Example}: 4 weights, 2 centroids\\[0.3em]
       \begin{tabular}{llll}
-        weight & value & $h_{ii}$ & cluster \\
+        weight & value & $h_{ii}$ \\
         \midrule
-        $w_1$ & $0.04$ & $10.0$ & A \\
-        $w_2$ & $0.06$ & $8.0$  & A \\
-        $w_3$ & $0.80$ & $0.1$  & B \\
-        $w_4$ & $1.00$ & $0.2$  & B \\
+        $w_1$ & $0.04$ & $10.0$ \\
+        $w_4$ & $1.00$ & $0.2$ \\
       \end{tabular}
     \end{column}
     \begin{column}{0.48\textwidth}
       \small
-      Standard K-means centroid A:\\
-      $\frac{0.04+0.06}{2} = 0.05$\\[0.5em]
+      Standard K-means centroid:\\
+      $\frac{0.04+1.00}{2} = 0.52$\\[0.5em]
       \textbf{Weighted} centroid A:\\
-      $\frac{10.0\times0.04\;+\;8.0\times0.06}{10.0+8.0} = \frac{0.88}{18} \approx 0.049$\\[0.5em]
+      $\frac{10.0\times0.04\;+\;0.2\times1.00}{10.0+0.2} = \frac{0.4+0.2}{10.2} \approx 0.059$\\[0.5em]
       \textcolor{mycolor}{High-$h_{ii}$ weights pull the centroid\\more strongly toward themselves}
     \end{column}
   \end{columns}
